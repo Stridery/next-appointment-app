@@ -151,6 +151,22 @@ export default function ProfileDropdown() {
               Profile
             </DropdownItem>
           </DropdownSection>
+          <DropdownSection title="Services" showDivider>
+            <DropdownItem 
+              key="membership"
+              onClick={() => router.push('/payment/membership')}
+              description="Manage your membership"
+            >
+              Membership
+            </DropdownItem>
+            <DropdownItem 
+              key="advertising"
+              onClick={() => router.push('/payment/advertising')}
+              description="Manage advertising campaigns"
+            >
+              Advertising
+            </DropdownItem>
+          </DropdownSection>
           <DropdownSection title="Help" showDivider>
             <DropdownItem key="help_and_feedback">Help & feedback</DropdownItem>
           </DropdownSection>
