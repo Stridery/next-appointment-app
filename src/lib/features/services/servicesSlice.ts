@@ -135,8 +135,8 @@ export const servicesSlice = createAppSlice({
     // code can then be executed and other actions can be dispatched. Thunks are
     // typically used to make async requests.
     updateServicesAsync: creator.asyncThunk(
-      async (services: Service[]) => {
-        const response = await fetchServices(services);
+      async () => {
+        const response = await fetchServices();
         // The value we return becomes the `fulfilled` action payload
         console.log("updateServicesAsync", response);
         return response.data;

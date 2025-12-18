@@ -4,15 +4,31 @@ import { fetchCompanies } from "./businessesAPI";
 
 // A mock function to mimic making an async request for data
 export const dummyBusinesses = [
-  { id: 1, name: "Studio One", city: "San Francisco" },
-  { id: 2, name: "Studio Two", city: "San Jose" },
+  {
+    id: 1,
+    name: "Studio One",
+    city: "San Francisco",
+    latitude: 37.7749,
+    longitude: -122.4194,
+    address: "123 Market Street, San Francisco, CA 94102",
+    phone: "(415) 555-0001",
+  },
+  {
+    id: 2,
+    name: "Studio Two",
+    city: "San Jose",
+    latitude: 37.3382,
+    longitude: -121.8863,
+    address: "456 Santa Clara Street, San Jose, CA 95113",
+    phone: "(408) 555-0002",
+  },
 ];
 
 export type Business = (typeof dummyBusinesses)[0];
 
 export interface CompaniesSliceState {
   value: Business[];
-  status: "idle" | "loading" | "failed";
+  status: "idle" | "loading" | "failed" | "success";
 }
 
 const initialState = {
@@ -64,8 +80,8 @@ export const businessesSlice = createAppSlice({
     // code can then be executed and other actions can be dispatched. Thunks are
     // typically used to make async requests.
     updateBuinessesAsync: creator.asyncThunk(
-      async (appointments: Business[]) => {
-        const response = await fetchCompanies(appointments);
+      async () => {
+        const response = await fetchCompanies();
         // The value we return becomes the `fulfilled` action payload
         console.log("updatedCompaniesAsync", response);
         return response.data;
@@ -75,7 +91,7 @@ export const businessesSlice = createAppSlice({
           state.status = "loading";
         },
         fulfilled: (state, action: PayloadAction<Business[]>) => {
-          state.status = "idle";
+          state.status = "success";
           state.value = action.payload;
         },
         rejected: (state) => {
