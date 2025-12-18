@@ -121,13 +121,13 @@ async function handleSubscriptionPurchase(body: any) {
       );
     }
 
-    // 3. Check if user already has an active subscription
+    // 3. Check if user is trying to subscribe to the same plan they already have
     const existingSubscription = await getActiveSubscription(userId);
-    if (existingSubscription) {
+    if (existingSubscription && existingSubscription.subscription_plan_id === subscriptionPlanId) {
       return NextResponse.json(
         {
           success: false,
-          error: 'You already have an active subscription. Please manage it through the customer portal.',
+          error: 'You already have an active subscription to this plan. Please choose a different plan or manage your current subscription through the customer portal.',
         },
         { status: 400 }
       );
@@ -156,6 +156,13 @@ async function handleSubscriptionPurchase(body: any) {
     const successUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/payment/subscription/success?session_id={CHECKOUT_SESSION_ID}`;
     const cancelUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/payment/subscription/cancel`;
 
+    // Use idempotency key to prevent duplicate subscriptions within a 5-minute window
+    // Same user + same plan within 5 minutes will be treated as duplicate
+    const timeWindow = Math.floor(Date.now() / (5 * 60 * 1000)); // 5-minute window
+    const idempotencyKey = `sub_${userId}_${plan.id}_${timeWindow}`;
+
+    console.log('🔑 Idempotency key:', idempotencyKey);
+
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
       customer: customerId,
@@ -178,6 +185,8 @@ async function handleSubscriptionPurchase(body: any) {
           subscription_plan_id: plan.id,
         },
       },
+    }, {
+      idempotencyKey: idempotencyKey,
     });
 
     console.log('✅ Stripe checkout session created:', session.id);

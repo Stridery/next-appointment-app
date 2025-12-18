@@ -16,17 +16,6 @@ export default function StateViewer() {
       <div className="my-4 flex justify-center">
         <AppointmentCalendar />
       </div>
-      <pre className="text-gray-400" style={{ whiteSpace: "pre-wrap" }}>
-        {JSON.stringify(appointments, null, 2)}
-      </pre>
-      <h3 className="text-xl">Users</h3>
-      <pre className="text-gray-400" style={{ whiteSpace: "pre-wrap" }}>
-        {JSON.stringify(users, null, 2)}
-      </pre>
-      <h3 className="text-xl">Busineeses</h3>
-      <pre className="text-gray-400" style={{ whiteSpace: "pre-wrap" }}>
-        {JSON.stringify(businesses, null, 2)}
-      </pre>
     </div>
   );
 }

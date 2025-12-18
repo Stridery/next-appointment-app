@@ -111,11 +111,6 @@ export default function AppointmentsAdmin() {
             Create
           </button>
         </div>
-        <div className="lg:col-span-2">
-          <pre className="text-gray-400" style={{ whiteSpace: "pre-wrap" }}>
-            {JSON.stringify(appointments, null, 2)}
-          </pre>
-        </div>
         <div className="lg:col-span-1">
           <Calendar />
         </div>

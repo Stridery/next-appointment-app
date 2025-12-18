@@ -57,9 +57,6 @@ export default function BusinessesAdmin() {
       >
         Create
       </button>
-      <pre className="text-gray-400" style={{ whiteSpace: "pre-wrap" }}>
-        {JSON.stringify(businesses, null, 2)}
-      </pre>
     </>
   );
 }

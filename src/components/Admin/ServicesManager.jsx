@@ -84,9 +84,6 @@ export default function ServicesManager() {
       >
         Create
       </button>
-      <pre className="text-gray-400" style={{ whiteSpace: "pre-wrap" }}>
-        {JSON.stringify(Services, null, 2)}
-      </pre>
     </>
   );
 }

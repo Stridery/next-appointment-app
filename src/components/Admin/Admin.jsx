@@ -157,9 +157,6 @@ export default function Admin() {
           >
             Create
           </button>
-          <pre className="text-gray-400" style={{ whiteSpace: "pre-wrap" }}>
-            {JSON.stringify(users, null, 2)}
-          </pre>
         </div>
         <div>
           <BusinessesManager />
@@ -211,9 +208,6 @@ export default function Admin() {
           >
             Create
           </button>
-          <pre className="text-gray-400" style={{ whiteSpace: "pre-wrap" }}>
-            {JSON.stringify(specialists, null, 2)}
-          </pre>
         </div>
         <div>
           <ServicesManager />

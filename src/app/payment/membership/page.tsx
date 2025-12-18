@@ -40,6 +40,7 @@ interface SubscriptionPlan {
 interface UserSubscription {
   id: string;
   status: string;
+  planId: string;
   planName: string;
   planDescription: string;
   currentPeriodStart: string;
@@ -104,6 +105,7 @@ export default function MembershipSubscriptionPage() {
           .select(`
             id,
             status,
+            subscription_plan_id,
             cancel_at_period_end,
             current_period_start,
             current_period_end,
@@ -128,6 +130,7 @@ export default function MembershipSubscriptionPage() {
           setCurrentSubscription({
             id: subscription.id,
             status: subscription.status,
+            planId: subscription.subscription_plan_id,
             planName: plan?.name || '',
             planDescription: plan?.description || '',
             currentPeriodStart: subscription.current_period_start,
@@ -178,6 +181,11 @@ export default function MembershipSubscriptionPage() {
       return;
     }
 
+    // Prevent double-click: if already loading, return immediately
+    if (loading) {
+      return;
+    }
+
     try {
       setLoading(true);
       setError(null);
@@ -186,6 +194,18 @@ export default function MembershipSubscriptionPage() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) {
         throw new Error('Please sign in to subscribe');
+      }
+
+      // Double-check: Prevent subscribing to the same plan
+      const { data: existingSub } = await supabase
+        .from('subscriptions')
+        .select('id, status, subscription_plan_id')
+        .eq('profile_id', user.id)
+        .in('status', ['active', 'trialing', 'past_due'])
+        .maybeSingle();
+
+      if (existingSub && existingSub.subscription_plan_id === selectedPlan.id) {
+        throw new Error('You already have an active subscription to this plan. Please choose a different plan or manage your current subscription.');
       }
 
       // Create checkout session for subscription
@@ -403,13 +423,13 @@ export default function MembershipSubscriptionPage() {
           </div>
         )}
 
-        {/* Show plans only if no active subscription */}
-        {!loadingSubscription && !currentSubscription && (
+        {/* Subscription Plans - Always visible */}
+        {!loadingSubscription && (
           <div className="max-w-5xl mx-auto">
             {/* Subscription Plans */}
             <div>
               <h2 className="text-2xl font-semibold text-gray-900 mb-6">
-                Choose a Plan
+                {currentSubscription ? 'Available Plans' : 'Choose a Plan'}
               </h2>
 
               {/* Loading State */}
@@ -428,11 +448,13 @@ export default function MembershipSubscriptionPage() {
               {/* Plans Grid */}
               {!loadingPlans && subscriptionPlans.length > 0 && (
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  {subscriptionPlans.map((plan) => (
+                  {subscriptionPlans.map((plan) => {
+                    const isCurrentPlan = currentSubscription?.planId === plan.id;
+                    return (
                   <button
                     key={plan.id}
                     onClick={() => handlePlanSelect(plan)}
-                    disabled={loading}
+                    disabled={loading || isCurrentPlan}
                     className={`
                       relative bg-white rounded-xl p-6 text-left
                       transition-all duration-200
@@ -441,13 +463,24 @@ export default function MembershipSubscriptionPage() {
                       ${
                         selectedPlan?.id === plan.id
                           ? 'border-blue-500 shadow-lg'
+                          : isCurrentPlan
+                          ? 'border-green-500 shadow-lg bg-green-50'
                           : 'border-gray-200 hover:border-gray-300'
                       }
-                      ${plan.isFeatured ? 'ring-2 ring-blue-400 ring-offset-2' : ''}
+                      ${plan.isFeatured && !isCurrentPlan ? 'ring-2 ring-blue-400 ring-offset-2' : ''}
                     `}
                   >
+                    {/* Current Plan Badge */}
+                    {isCurrentPlan && (
+                      <div className="absolute -top-3 left-1/2 transform -translate-x-1/2">
+                        <span className="bg-green-600 text-white text-xs font-bold px-3 py-1 rounded-full">
+                          CURRENT PLAN
+                        </span>
+                      </div>
+                    )}
+                    
                     {/* Featured Badge */}
-                    {plan.isFeatured && (
+                    {plan.isFeatured && !isCurrentPlan && (
                       <div className="absolute -top-3 left-1/2 transform -translate-x-1/2">
                         <span className="bg-blue-600 text-white text-xs font-bold px-3 py-1 rounded-full">
                           RECOMMENDED
@@ -489,7 +522,8 @@ export default function MembershipSubscriptionPage() {
                       ))}
                     </ul>
                   </button>
-                ))}
+                    );
+                  })}
                 </div>
               )}
 
@@ -512,9 +546,16 @@ export default function MembershipSubscriptionPage() {
                   <div className="flex items-start justify-between mb-6">
                     <div>
                       <h3 className="text-2xl font-bold text-gray-900 mb-2">
-                        {selectedPlan.name} Subscription
+                        {currentSubscription && currentSubscription.planId !== selectedPlan.id 
+                          ? `Switch to ${selectedPlan.name}` 
+                          : `${selectedPlan.name} Subscription`}
                       </h3>
                       <p className="text-gray-600">{selectedPlan.description}</p>
+                      {currentSubscription && currentSubscription.planId !== selectedPlan.id && (
+                        <p className="text-sm text-orange-600 mt-2">
+                          ⚠️ Switching plans will change your billing. Your current subscription will be prorated.
+                        </p>
+                      )}
                     </div>
                     <div className="text-right">
                       <div className="text-3xl font-bold text-blue-600">
@@ -557,6 +598,13 @@ export default function MembershipSubscriptionPage() {
                           <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                         </svg>
                         Processing...
+                      </>
+                    ) : currentSubscription && currentSubscription.planId !== selectedPlan.id ? (
+                      <>
+                        <svg className="w-6 h-6 mr-2" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" clipRule="evenodd" />
+                        </svg>
+                        Switch to This Plan - {selectedPlan.displayPrice}/{selectedPlan.billingPeriod}
                       </>
                     ) : (
                       <>
