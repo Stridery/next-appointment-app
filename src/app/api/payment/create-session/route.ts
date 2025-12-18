@@ -2,94 +2,52 @@
  * API Route: Create Checkout Session
  * POST /api/payment/create-session
  * 
- * 创建 Stripe Checkout Session (支持 membership 和 advertising)
+ * 创建 Stripe Checkout Session (支持 subscription 和 advertising)
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createCheckoutSession } from '@/src/payments';
-import type { CreateMembershipSessionRequest } from '@/src/payments/types/membership';
+import { getStripeClient } from '@/src/payments/stripe';
 import {
-  getMembershipPlan,
-  createMembershipOrder,
-  updateOrderStripeSession as updateMembershipStripeSession,
-} from '@/src/payments/service/membershipService';
+  getSubscriptionPlan,
+  getOrCreateStripeCustomer,
+  getActiveSubscription,
+  getProfile,
+} from '@/src/payments/service/subscriptionService';
 import {
   getUserFirstBusiness,
-  getAdPlanByPackageId,
+  calculateAdPrice,
 } from '@/src/payments/service/advertisingService';
+import { createCheckoutSession } from '@/src/payments';
 
 /**
  * POST /api/payment/create-session
  * 
- * 支持三种产品类型：
- * 1. membership - 会员购买
+ * 支持两种产品类型：
+ * 1. subscription - 订阅会员
  * 2. advertising - 广告投放
- * 3. 普通支付（原有逻辑）
  */
 export async function POST(request: NextRequest) {
   try {
     // 解析请求体
     const body = await request.json();
 
-    // Check if this is a membership purchase
-    if (body.productType === 'membership') {
-      return handleMembershipPurchase(body as CreateMembershipSessionRequest);
+    // Check if this is a subscription purchase
+    if (body.productType === 'subscription') {
+      return handleSubscriptionPurchase(body);
     }
 
     // Check if this is an advertising purchase
-    if (body.metadata?.productType === 'advertising') {
+    if (body.productType === 'advertising') {
       return handleAdvertisingPurchase(body);
     }
 
-    // 普通支付逻辑（原有的）
-    // 验证必填字段
-    if (!body.amount || typeof body.amount !== 'number') {
-      return NextResponse.json(
-        { 
-          success: false, 
-          error: 'Invalid amount. Must be a number in cents.' 
-        },
-        { status: 400 }
-      );
-    }
-
-    if (!body.description || typeof body.description !== 'string') {
-      return NextResponse.json(
-        { 
-          success: false, 
-          error: 'Description is required.' 
-        },
-        { status: 400 }
-      );
-    }
-
-    // 金额验证（至少 50 分）
-    if (body.amount < 50) {
-      return NextResponse.json(
-        { 
-          success: false, 
-          error: 'Amount must be at least 50 cents.' 
-        },
-        { status: 400 }
-      );
-    }
-
-    console.log('📝 Creating checkout session:', {
-      amount: body.amount,
-      description: body.description,
-      currency: body.currency || 'usd',
-    });
-
-    // 调用服务层创建 Session
-    const result = await createCheckoutSession(body);
-
-    console.log('✅ Checkout session created successfully:', result.sessionId);
-
-    return NextResponse.json({
-      success: true,
-      sessionId: result.sessionId,
-      url: result.url,
-    });
+    return NextResponse.json(
+      { 
+        success: false, 
+        error: 'Invalid product type. Must be "subscription" or "advertising".' 
+      },
+      { status: 400 }
+    );
 
   } catch (error) {
     console.error('❌ Error creating checkout session:', error);
@@ -109,80 +67,128 @@ export async function POST(request: NextRequest) {
 }
 
 /**
- * Handle membership purchase
+ * Handle subscription purchase
  */
-async function handleMembershipPurchase(body: CreateMembershipSessionRequest) {
+async function handleSubscriptionPurchase(body: any) {
   try {
-    const { membershipPlanId, userId } = body;
+    const { subscriptionPlanId, userId } = body;
+    const stripe = getStripeClient();
 
-    // Validate required fields
-    if (!membershipPlanId || !userId) {
+    if (!stripe) {
       return NextResponse.json(
         {
           success: false,
-          error: 'Missing membershipPlanId or userId',
-        },
-        { status: 400 }
-      );
-    }
-
-    // 1. Get membership plan
-    const plan = await getMembershipPlan(membershipPlanId);
-    if (!plan) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Membership plan not found or inactive',
-        },
-        { status: 404 }
-      );
-    }
-
-    // 2. Create membership order (directly use userId, no need to query profile)
-    const order = await createMembershipOrder(
-      userId,
-      plan.id,
-      plan.price_cents,
-      plan.currency
-    );
-
-    if (!order) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Failed to create membership order',
+          error: 'Payment system not configured',
         },
         { status: 500 }
       );
     }
 
-    console.log('✅ Membership order created:', order.id);
+    // Validate required fields
+    if (!subscriptionPlanId || !userId) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Missing subscriptionPlanId or userId',
+        },
+        { status: 400 }
+      );
+    }
 
-    // 3. Create Stripe Checkout Session
-    const result = await createCheckoutSession({
-      amount: plan.price_cents,
-      description: `${plan.name} Membership`,
-      currency: plan.currency,
+    // 1. Get subscription plan
+    const plan = await getSubscriptionPlan(subscriptionPlanId);
+    if (!plan || !plan.stripe_price_id) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Subscription plan not found or not properly configured',
+        },
+        { status: 404 }
+      );
+    }
+
+    console.log('✅ Found subscription plan:', plan.name);
+
+    // 2. Get user profile
+    const profile = await getProfile(userId);
+    if (!profile) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'User profile not found',
+        },
+        { status: 404 }
+      );
+    }
+
+    // 3. Check if user already has an active subscription
+    const existingSubscription = await getActiveSubscription(userId);
+    if (existingSubscription) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'You already have an active subscription. Please manage it through the customer portal.',
+        },
+        { status: 400 }
+      );
+    }
+
+    // 4. Get or create Stripe customer
+    const customerId = await getOrCreateStripeCustomer(
+      userId,
+      profile.email,
+      profile.name || undefined
+    );
+
+    if (!customerId) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Failed to create customer record',
+        },
+        { status: 500 }
+      );
+    }
+
+    console.log('✅ Stripe customer ID:', customerId);
+
+    // 5. Create Stripe Checkout Session for subscription
+    const successUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/payment/subscription/success?session_id={CHECKOUT_SESSION_ID}`;
+    const cancelUrl = `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/payment/subscription/cancel`;
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      customer: customerId,
+      line_items: [
+        {
+          price: plan.stripe_price_id,
+          quantity: 1,
+        },
+      ],
+      success_url: successUrl,
+      cancel_url: cancelUrl,
       metadata: {
-        productType: 'membership',
-        membershipOrderId: order.id,
+        productType: 'subscription',
         profileId: userId,
-        membershipPlanId: plan.id,
+        subscriptionPlanId: plan.id,
+      },
+      subscription_data: {
+        metadata: {
+          profile_id: userId,
+          subscription_plan_id: plan.id,
+        },
       },
     });
 
-    // 4. Update order with Stripe session ID
-    await updateMembershipStripeSession(order.id, result.sessionId);
-
-    console.log('✅ Stripe session created for membership:', result.sessionId);
+    console.log('✅ Stripe checkout session created:', session.id);
 
     return NextResponse.json({
       success: true,
-      sessionId: result.sessionId,
-      url: result.url,
+      sessionId: session.id,
+      url: session.url,
     });
   } catch (error) {
-    console.error('❌ Error handling membership purchase:', error);
+    console.error('❌ Error handling subscription purchase:', error);
 
     const errorMessage =
       error instanceof Error ? error.message : 'An unexpected error occurred';
@@ -198,31 +204,41 @@ async function handleMembershipPurchase(body: CreateMembershipSessionRequest) {
 }
 
 /**
- * Handle advertising purchase
+ * Handle advertising purchase (pay-per-day model)
  */
 async function handleAdvertisingPurchase(body: any) {
   try {
-    const { amount, description, currency, metadata } = body;
-    const { packageId, packageName, userId } = metadata;
+    const { userId, businessId, days } = body;
 
     // Validate required fields
-    if (!packageId || !packageName || !userId || !amount) {
+    if (!userId || !businessId || !days) {
       return NextResponse.json(
         {
           success: false,
-          error: 'Missing required fields for advertising purchase',
+          error: 'Missing required fields: userId, businessId, or days',
         },
         { status: 400 }
       );
     }
 
-    // 1. Get user's first business
-    const business = await getUserFirstBusiness(userId);
-    if (!business) {
+    // Validate days is a positive number
+    if (typeof days !== 'number' || days < 1) {
       return NextResponse.json(
         {
           success: false,
-          error: 'No business found for this user. Please create a business first.',
+          error: 'Days must be a positive number (minimum 1)',
+        },
+        { status: 400 }
+      );
+    }
+
+    // 1. Get user's business
+    const business = await getUserFirstBusiness(userId);
+    if (!business || business.id !== businessId) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Business not found or does not belong to this user',
         },
         { status: 404 }
       );
@@ -230,31 +246,38 @@ async function handleAdvertisingPurchase(body: any) {
 
     console.log('✅ Found business:', business.name);
 
-    // 2. Get ad plan based on package ID
-    const adPlan = await getAdPlanByPackageId(packageId);
-    if (!adPlan) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Ad plan not found. Please contact support.',
-        },
-        { status: 404 }
-      );
-    }
+    // 2. Check if user has active membership
+    const subscription = await getActiveSubscription(userId);
+    const hasMembership = subscription?.status === 'active';
 
-    console.log('✅ Found ad plan:', adPlan.name);
+    console.log('🎖️ Membership status:', hasMembership ? 'Active (5% discount)' : 'None');
 
-    // 3. Create Stripe Checkout Session
+    // 3. Calculate price
+    const dailyRateCents = 500; // $5.00 per day
+    const pricing = calculateAdPrice(days, dailyRateCents, hasMembership);
+
+    console.log('💰 Pricing:', {
+      days,
+      dailyRate: `$${dailyRateCents / 100}`,
+      subtotal: `$${pricing.subtotal / 100}`,
+      discount: hasMembership ? `${pricing.discountPercent}% (-$${pricing.discountAmount / 100})` : 'None',
+      total: `$${pricing.total / 100}`,
+    });
+
+    // 4. Create Stripe Checkout Session
     const result = await createCheckoutSession({
-      amount,
-      description: description || `${packageName} Advertising Package`,
-      currency: currency || 'usd',
+      amount: pricing.total,
+      description: `Advertising Campaign - ${days} day${days > 1 ? 's' : ''}`,
+      currency: 'usd',
       metadata: {
         productType: 'advertising',
-        businessId: business.id,
-        adPlanId: adPlan.id,
-        packageId,
         userId,
+        businessId: business.id,
+        days: days.toString(),
+        dailyRateCents: dailyRateCents.toString(),
+        hasMembership: hasMembership.toString(),
+        discountPercent: pricing.discountPercent.toString(),
+        totalAmountCents: pricing.total.toString(),
       },
     });
 

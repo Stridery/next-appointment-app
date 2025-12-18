@@ -78,9 +78,9 @@ export async function handlePaymentCompleted(
     // Check product type from metadata
     const productType = session.metadata?.productType;
 
-    if (productType === 'membership') {
-      // Handle membership purchase
-      return await handleMembershipPurchase(session);
+    if (productType === 'subscription') {
+      // Handle subscription checkout
+      return await handleSubscriptionCheckout(session);
     } else if (productType === 'advertising') {
       // Handle advertising purchase
       return await handleAdvertisingPurchase(session);
@@ -104,140 +104,149 @@ export async function handlePaymentCompleted(
 }
 
 /**
- * Handle membership purchase completion
+ * Handle subscription creation (checkout.session.completed with subscription)
  */
-async function handleMembershipPurchase(
+async function handleSubscriptionCheckout(
   session: Stripe.Checkout.Session
 ): Promise<WebhookHandlerResult> {
   try {
-    const { membershipOrderId, profileId, membershipPlanId } = session.metadata || {};
+    const { profileId, subscriptionPlanId } = session.metadata || {};
 
-    if (!membershipOrderId || !profileId || !membershipPlanId) {
-      console.error('❌ Missing required metadata for membership purchase');
+    if (!profileId || !subscriptionPlanId) {
+      console.error('❌ Missing required metadata for subscription checkout');
       return {
         success: false,
         message: 'Missing required metadata',
       };
     }
 
-    // Import membership service functions
+    // Import subscription service functions
     const {
-      getMembershipOrder,
-      markOrderAsPaid,
-      getMembershipPlan,
-      getProfile,
-      calculateNewExpirationDate,
-      updateProfileMembership,
-    } = await import('./membershipService');
+      getSubscriptionPlan,
+      createSubscription,
+      getSubscriptionByStripeId,
+      createSubscriptionPayment,
+    } = await import('./subscriptionService');
 
-    // 1. Get the order
-    const order = await getMembershipOrder(membershipOrderId);
-    if (!order) {
-      console.error('❌ Membership order not found:', membershipOrderId);
+    const stripe = getStripeClient();
+    if (!stripe) {
       return {
         success: false,
-        message: 'Order not found',
+        message: 'Stripe not configured',
       };
     }
 
-    // 2. Check if already paid (idempotency)
-    if (order.status === 'paid') {
-      console.log('⚠️  Order already marked as paid (idempotent):', order.id);
+    // 1. Get Stripe subscription details
+    const stripeSubscriptionId = session.subscription as string;
+    if (!stripeSubscriptionId) {
+      console.error('❌ No subscription ID in session');
+      return {
+        success: false,
+        message: 'No subscription ID',
+      };
+    }
+
+    // Check if already processed (idempotency)
+    const existingSubscription = await getSubscriptionByStripeId(stripeSubscriptionId);
+    if (existingSubscription) {
+      console.log('⚠️  Subscription already processed (idempotent):', stripeSubscriptionId);
       return {
         success: true,
-        message: 'Order already processed',
+        message: 'Subscription already processed',
       };
     }
 
-    // 3. Mark order as paid
-    const paymentIntentId = session.payment_intent as string;
-    const orderUpdated = await markOrderAsPaid(order.id, paymentIntentId);
-    if (!orderUpdated) {
-      console.error('❌ Failed to mark order as paid');
+    // 2. Get subscription from Stripe
+    const stripeSubscription = await stripe.subscriptions.retrieve(stripeSubscriptionId);
+
+    // 3. Get plan
+    const plan = await getSubscriptionPlan(subscriptionPlanId);
+    if (!plan) {
+      console.error('❌ Subscription plan not found');
       return {
         success: false,
-        message: 'Failed to update order',
+        message: 'Plan not found',
       };
     }
 
-    console.log('✅ Membership order marked as paid:', order.id);
-
-    // 4. Get plan and profile
-    const [plan, profile] = await Promise.all([
-      getMembershipPlan(membershipPlanId),
-      getProfile(profileId),
-    ]);
-
-    if (!plan || !profile) {
-      console.error('❌ Plan or profile not found');
-      return {
-        success: false,
-        message: 'Plan or profile not found',
-      };
-    }
-
-    // 5. Calculate new expiration date
-    // Default to 30 days if interval is 'month'
-    const durationDays = plan.interval === 'year' ? 365 : 30;
-    const newExpiresAt = calculateNewExpirationDate(
-      profile.membership_expires_at,
-      durationDays
-    );
-
-    console.log('📅 Calculated new expiration:', {
-      currentExpires: profile.membership_expires_at,
-      durationDays,
-      newExpires: newExpiresAt,
-    });
-
-    // 6. Update profile with new membership
-    const profileUpdated = await updateProfileMembership(
-      profile.id,
+    // 4. Create subscription record
+    const subscription = await createSubscription(
+      profileId,
       plan.id,
-      newExpiresAt
+      stripeSubscription.id,
+      stripeSubscription.customer as string,
+      stripeSubscription.items.data[0].price.id,
+      stripeSubscription.status as any,
+      new Date(stripeSubscription.current_period_start * 1000),
+      new Date(stripeSubscription.current_period_end * 1000)
     );
 
-    if (!profileUpdated) {
-      console.error('❌ Failed to update profile membership');
+    if (!subscription) {
+      console.error('❌ Failed to create subscription record');
       return {
         success: false,
-        message: 'Failed to update profile',
+        message: 'Failed to create subscription',
       };
     }
 
-    console.log('✅ Profile membership updated:', {
-      profileId: profile.id,
-      planId: plan.id,
-      expiresAt: newExpiresAt,
+    console.log('✅ Subscription created:', {
+      subscriptionId: subscription.id,
+      stripeSubscriptionId: stripeSubscription.id,
+      planName: plan.name,
+      status: stripeSubscription.status,
     });
 
-    // TODO: Send confirmation email
-    // await sendMembershipConfirmationEmail(profile.email, plan.name, newExpiresAt);
+    // 5. Record initial payment if subscription_payments table exists
+    if (stripeSubscription.latest_invoice) {
+      const invoice = await stripe.invoices.retrieve(stripeSubscription.latest_invoice as string);
+      
+      await createSubscriptionPayment(
+        subscription.id,
+        profileId,
+        invoice.id,
+        invoice.payment_intent as string,
+        invoice.amount_paid,
+        invoice.currency,
+        invoice.billing_reason,
+        new Date(invoice.period_start * 1000),
+        new Date(invoice.period_end * 1000),
+        invoice.status === 'paid' ? 'paid' : 'pending'
+      );
+    }
 
     return {
       success: true,
-      message: 'Membership activated successfully',
+      message: 'Subscription created successfully',
     };
   } catch (error) {
-    console.error('❌ Error handling membership purchase:', error);
+    console.error('❌ Error handling subscription checkout:', error);
     return {
       success: false,
-      message: 'Error processing membership purchase',
+      message: 'Error processing subscription checkout',
       error: error instanceof Error ? error.message : 'Unknown error',
     };
   }
 }
 
 /**
- * Handle advertising purchase completion
+ * Handle advertising purchase completion (pay-per-day model)
  */
 async function handleAdvertisingPurchase(
   session: Stripe.Checkout.Session
 ): Promise<WebhookHandlerResult> {
   try {
-    const { businessId, adPlanId } = session.metadata || {};
+    const metadata = session.metadata || {};
+    const {
+      businessId,
+      days,
+      dailyRateCents,
+      hasMembership,
+      discountPercent,
+      totalAmountCents,
+    } = metadata;
 
-    if (!businessId || !adPlanId) {
+    // Validate metadata
+    if (!businessId || !days || !dailyRateCents || !totalAmountCents) {
       console.error('❌ Missing required metadata for advertising purchase');
       return {
         success: false,
@@ -245,89 +254,87 @@ async function handleAdvertisingPurchase(
       };
     }
 
+    // Parse numeric values
+    const daysPurchased = parseInt(days, 10);
+    const dailyRate = parseInt(dailyRateCents, 10);
+    const totalAmount = parseInt(totalAmountCents, 10);
+    const discount = parseFloat(discountPercent || '0');
+    const hadMembership = hasMembership === 'true';
+
     console.log('📢 Processing advertising purchase:', {
       sessionId: session.id,
       businessId,
-      adPlanId,
+      days: daysPurchased,
+      dailyRate: `$${dailyRate / 100}`,
+      total: `$${totalAmount / 100}`,
+      discount: discount > 0 ? `${discount}%` : 'None',
     });
 
     // Import advertising service functions
     const {
-      getExistingAdForPlan,
-      getLatestAdForBusiness,
-      getAdPlan,
+      getActiveAd,
       calculateAdDates,
       createAd,
-      updateAdEndAt,
+      extendAd,
     } = await import('./advertisingService');
 
     const paymentIntentId = session.payment_intent as string;
     const sessionId = session.id;
 
-    // 1. Get ad plan
-    const adPlan = await getAdPlan(adPlanId);
-    if (!adPlan) {
-      console.error('❌ Ad plan not found:', adPlanId);
-      return {
-        success: false,
-        message: 'Ad plan not found',
-      };
-    }
+    // 1. Check for existing active ad
+    const activeAd = await getActiveAd(businessId);
 
-    // 2. Check if there's an existing ad for the same plan
-    const existingAd = await getExistingAdForPlan(businessId, adPlanId);
-    
-    // 3. Get latest ad (for different plan case)
-    const latestAd = await getLatestAdForBusiness(businessId);
+    // 2. Calculate campaign dates
+    const { startAt, endAt } = calculateAdDates(daysPurchased, activeAd);
 
-    console.log('📊 Ad status:', {
-      adPlanName: adPlan.name,
-      existingAdId: existingAd?.id,
-      existingEndAt: existingAd?.end_at,
-      latestAdId: latestAd?.id,
-      latestEndAt: latestAd?.end_at,
-    });
-
-    // 4. Calculate dates
-    const { startAt, endAt } = calculateAdDates(adPlan, existingAd, latestAd);
-
-    console.log('📅 Calculated dates:', {
+    console.log('📅 Campaign dates:', {
       startAt: startAt.toISOString(),
       endAt: endAt.toISOString(),
+      action: activeAd ? 'Extending existing campaign' : 'Creating new campaign',
     });
 
-    // 5. Update or create
-    if (existingAd) {
-      // Same plan: update end_at
-      console.log('🔄 Renewing existing ad:', existingAd.id);
-      
-      const updated = await updateAdEndAt(
-        existingAd.id,
+    // 3. Create or extend campaign
+    if (activeAd) {
+      // Extend existing campaign
+      console.log('🔄 Extending existing campaign:', activeAd.id);
+
+      const extended = await extendAd(
+        activeAd.id,
+        daysPurchased,
+        dailyRate,
+        totalAmount,
+        discount,
+        hadMembership,
         endAt,
         sessionId,
         paymentIntentId
       );
 
-      if (!updated) {
-        console.error('❌ Failed to update ad end_at');
+      if (!extended) {
+        console.error('❌ Failed to extend ad campaign');
         return {
           success: false,
-          message: 'Failed to update ad',
+          message: 'Failed to extend campaign',
         };
       }
 
-      console.log('✅ Ad renewed:', {
-        adId: existingAd.id,
-        oldEndAt: existingAd.end_at,
+      console.log('✅ Campaign extended:', {
+        adId: activeAd.id,
+        previousEndAt: activeAd.end_at,
         newEndAt: endAt.toISOString(),
+        additionalDays: daysPurchased,
       });
     } else {
-      // Different plan or first ad: create new
-      console.log('🆕 Creating new ad');
-      
+      // Create new campaign
+      console.log('🆕 Creating new ad campaign');
+
       const newAd = await createAd(
         businessId,
-        adPlanId,
+        daysPurchased,
+        dailyRate,
+        totalAmount,
+        discount,
+        hadMembership,
         startAt,
         endAt,
         sessionId,
@@ -335,17 +342,18 @@ async function handleAdvertisingPurchase(
       );
 
       if (!newAd) {
-        console.error('❌ Failed to create ad');
+        console.error('❌ Failed to create ad campaign');
         return {
           success: false,
-          message: 'Failed to create ad',
+          message: 'Failed to create campaign',
         };
       }
 
-      console.log('✅ New ad created:', {
+      console.log('✅ New campaign created:', {
         adId: newAd.id,
         startAt: newAd.start_at,
         endAt: newAd.end_at,
+        days: daysPurchased,
       });
     }
 
@@ -398,6 +406,255 @@ export async function handlePaymentFailed(
 }
 
 /**
+ * Handle subscription updates (renewals, cancellations, etc.)
+ */
+async function handleSubscriptionUpdated(
+  subscription: Stripe.Subscription
+): Promise<WebhookHandlerResult> {
+  try {
+    const {
+      getSubscriptionByStripeId,
+      updateSubscription,
+    } = await import('./subscriptionService');
+
+    // 1. Get subscription from database
+    const dbSubscription = await getSubscriptionByStripeId(subscription.id);
+    if (!dbSubscription) {
+      console.error('❌ Subscription not found in database:', subscription.id);
+      return {
+        success: false,
+        message: 'Subscription not found',
+      };
+    }
+
+    // 2. Update subscription
+    const updated = await updateSubscription(dbSubscription.id, {
+      status: subscription.status as any,
+      cancel_at_period_end: subscription.cancel_at_period_end,
+      current_period_start: new Date(subscription.current_period_start * 1000),
+      current_period_end: new Date(subscription.current_period_end * 1000),
+      canceled_at: subscription.canceled_at ? new Date(subscription.canceled_at * 1000) : null,
+    });
+
+    if (!updated) {
+      console.error('❌ Failed to update subscription');
+      return {
+        success: false,
+        message: 'Failed to update subscription',
+      };
+    }
+
+    console.log('✅ Subscription updated:', {
+      subscriptionId: dbSubscription.id,
+      status: subscription.status,
+      cancelAtPeriodEnd: subscription.cancel_at_period_end,
+    });
+
+    return {
+      success: true,
+      message: 'Subscription updated successfully',
+    };
+  } catch (error) {
+    console.error('❌ Error handling subscription update:', error);
+    return {
+      success: false,
+      message: 'Error processing subscription update',
+      error: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+
+/**
+ * Handle subscription deletion
+ */
+async function handleSubscriptionDeleted(
+  subscription: Stripe.Subscription
+): Promise<WebhookHandlerResult> {
+  try {
+    const {
+      getSubscriptionByStripeId,
+      updateSubscription,
+    } = await import('./subscriptionService');
+
+    // 1. Get subscription from database
+    const dbSubscription = await getSubscriptionByStripeId(subscription.id);
+    if (!dbSubscription) {
+      console.log('⚠️  Subscription already deleted or not found:', subscription.id);
+      return {
+        success: true,
+        message: 'Subscription not found (already deleted)',
+      };
+    }
+
+    // 2. Update subscription status
+    const updated = await updateSubscription(dbSubscription.id, {
+      status: 'canceled',
+      ended_at: new Date(),
+    });
+
+    if (!updated) {
+      console.error('❌ Failed to mark subscription as deleted');
+      return {
+        success: false,
+        message: 'Failed to update subscription',
+      };
+    }
+
+    console.log('✅ Subscription deleted:', {
+      subscriptionId: dbSubscription.id,
+    });
+
+    return {
+      success: true,
+      message: 'Subscription deleted successfully',
+    };
+  } catch (error) {
+    console.error('❌ Error handling subscription deletion:', error);
+    return {
+      success: false,
+      message: 'Error processing subscription deletion',
+      error: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+
+/**
+ * Handle invoice payment succeeded
+ */
+async function handleInvoicePaymentSucceeded(
+  invoice: Stripe.Invoice
+): Promise<WebhookHandlerResult> {
+  try {
+    const {
+      getSubscriptionByStripeId,
+      createSubscriptionPayment,
+      updateSubscriptionPaymentStatus,
+    } = await import('./subscriptionService');
+
+    // Get subscription
+    if (!invoice.subscription) {
+      console.log('ℹ️  Invoice not related to subscription');
+      return {
+        success: true,
+        message: 'Non-subscription invoice',
+      };
+    }
+
+    const dbSubscription = await getSubscriptionByStripeId(invoice.subscription as string);
+    if (!dbSubscription) {
+      console.error('❌ Subscription not found:', invoice.subscription);
+      return {
+        success: false,
+        message: 'Subscription not found',
+      };
+    }
+
+    // Record payment (if using subscription_payments table)
+    try {
+      await createSubscriptionPayment(
+        dbSubscription.id,
+        dbSubscription.profile_id,
+        invoice.id,
+        invoice.payment_intent as string,
+        invoice.amount_paid,
+        invoice.currency,
+        invoice.billing_reason,
+        new Date(invoice.period_start * 1000),
+        new Date(invoice.period_end * 1000),
+        'paid'
+      );
+    } catch (err) {
+      // If payment already exists, update it
+      await updateSubscriptionPaymentStatus(
+        invoice.id,
+        'paid',
+        invoice.payment_intent as string
+      );
+    }
+
+    console.log('✅ Invoice payment recorded:', {
+      invoiceId: invoice.id,
+      amount: invoice.amount_paid,
+      billingReason: invoice.billing_reason,
+    });
+
+    return {
+      success: true,
+      message: 'Invoice payment recorded successfully',
+    };
+  } catch (error) {
+    console.error('❌ Error handling invoice payment:', error);
+    return {
+      success: false,
+      message: 'Error processing invoice payment',
+      error: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+
+/**
+ * Handle invoice payment failed
+ */
+async function handleInvoicePaymentFailed(
+  invoice: Stripe.Invoice
+): Promise<WebhookHandlerResult> {
+  try {
+    const {
+      getSubscriptionByStripeId,
+      updateSubscription,
+      updateSubscriptionPaymentStatus,
+    } = await import('./subscriptionService');
+
+    // Get subscription
+    if (!invoice.subscription) {
+      console.log('ℹ️  Invoice not related to subscription');
+      return {
+        success: true,
+        message: 'Non-subscription invoice',
+      };
+    }
+
+    const dbSubscription = await getSubscriptionByStripeId(invoice.subscription as string);
+    if (!dbSubscription) {
+      console.error('❌ Subscription not found:', invoice.subscription);
+      return {
+        success: false,
+        message: 'Subscription not found',
+      };
+    }
+
+    // Update subscription status to past_due if not already
+    if (dbSubscription.status !== 'past_due') {
+      await updateSubscription(dbSubscription.id, {
+        status: 'past_due',
+      });
+    }
+
+    // Update payment status
+    await updateSubscriptionPaymentStatus(invoice.id, 'failed');
+
+    console.log('⚠️  Invoice payment failed:', {
+      invoiceId: invoice.id,
+      subscriptionId: dbSubscription.id,
+    });
+
+    // TODO: Send payment failure notification email
+
+    return {
+      success: true,
+      message: 'Invoice payment failure recorded',
+    };
+  } catch (error) {
+    console.error('❌ Error handling invoice payment failure:', error);
+    return {
+      success: false,
+      message: 'Error processing invoice payment failure',
+      error: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+}
+
+/**
  * 主 Webhook 事件处理器
  * 
  * @param event - Stripe Event 对象
@@ -409,11 +666,12 @@ export async function handleWebhookEvent(
   console.log('📨 Received webhook event:', event.type);
 
   switch (event.type) {
+    // Checkout session completed
     case 'checkout.session.completed': {
       const session = event.data.object as Stripe.Checkout.Session;
       
       // 检查支付状态
-      if (session.payment_status === 'paid') {
+      if (session.payment_status === 'paid' || session.mode === 'subscription') {
         return await handlePaymentCompleted(session);
       } else {
         console.warn('⚠️  Checkout session completed but payment not paid:', session.id);
@@ -424,6 +682,38 @@ export async function handleWebhookEvent(
       }
     }
 
+    // Subscription lifecycle events
+    case 'customer.subscription.created': {
+      const subscription = event.data.object as Stripe.Subscription;
+      console.log('ℹ️  Subscription created (handled via checkout.session.completed):', subscription.id);
+      return {
+        success: true,
+        message: 'Subscription creation acknowledged',
+      };
+    }
+
+    case 'customer.subscription.updated': {
+      const subscription = event.data.object as Stripe.Subscription;
+      return await handleSubscriptionUpdated(subscription);
+    }
+
+    case 'customer.subscription.deleted': {
+      const subscription = event.data.object as Stripe.Subscription;
+      return await handleSubscriptionDeleted(subscription);
+    }
+
+    // Invoice events
+    case 'invoice.payment_succeeded': {
+      const invoice = event.data.object as Stripe.Invoice;
+      return await handleInvoicePaymentSucceeded(invoice);
+    }
+
+    case 'invoice.payment_failed': {
+      const invoice = event.data.object as Stripe.Invoice;
+      return await handleInvoicePaymentFailed(invoice);
+    }
+
+    // Payment failures
     case 'checkout.session.async_payment_failed':
     case 'checkout.session.expired': {
       const session = event.data.object as Stripe.Checkout.Session;
@@ -434,8 +724,6 @@ export async function handleWebhookEvent(
       const paymentIntent = event.data.object as Stripe.PaymentIntent;
       console.log('✅ PaymentIntent succeeded:', paymentIntent.id);
       
-      // TODO: 如果需要，可以在这里添加额外的处理逻辑
-      
       return {
         success: true,
         message: 'PaymentIntent succeeded',
@@ -445,8 +733,6 @@ export async function handleWebhookEvent(
     case 'payment_intent.payment_failed': {
       const paymentIntent = event.data.object as Stripe.PaymentIntent;
       console.log('❌ PaymentIntent failed:', paymentIntent.id);
-      
-      // TODO: 处理支付失败
       
       return {
         success: true,

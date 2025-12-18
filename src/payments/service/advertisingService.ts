@@ -1,15 +1,15 @@
 /**
- * Advertising Service
- * Handles advertising-related database operations using `ads` table only
+ * Advertising Service (Simplified)
+ * Handles ad campaign operations without ad plans
  */
 
 import { createClient } from '@supabase/supabase-js';
+import type { Ad, Business } from '../types/advertising';
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
 
 // Create Supabase client for server-side operations
-// Service role key bypasses RLS policies
 const supabase = createClient(supabaseUrl, supabaseServiceKey, {
   auth: {
     autoRefreshToken: false,
@@ -17,50 +17,19 @@ const supabase = createClient(supabaseUrl, supabaseServiceKey, {
   },
 });
 
-export interface Ad {
-  id: string;
-  business_id: string;
-  ad_plan_id: string;
-  status: string;
-  start_at: string | null;
-  end_at: string | null;
-  stripe_session_id: string | null;
-  stripe_payment_intent_id: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface AdPlan {
-  id: string;
-  code: string;
-  name: string;
-  description: string | null;
-  price_cents: number;
-  currency: string;
-  billing_interval: string;
-  billing_interval_count: number;
-  features: string[] | null;
-  placement: string | null;
-  is_featured: boolean;
-  is_active: boolean;
-  created_at: string;
-  updated_at: string;
-}
-
 /**
- * Get user's first business
- * Returns the first business owned by the user
+ * Get user's first business (for simplicity)
  */
-export async function getUserFirstBusiness(userId: string): Promise<{ id: string; name: string } | null> {
+export async function getUserFirstBusiness(userId: string): Promise<Business | null> {
   const { data, error } = await supabase
     .from('businesses')
-    .select('id, name')
+    .select('id, name, owner_id')
     .eq('owner_id', userId)
     .limit(1)
-    .single();
+    .maybeSingle();
 
   if (error) {
-    console.error('Error fetching user business:', error);
+    console.error('Error fetching business:', error);
     return null;
   }
 
@@ -68,156 +37,74 @@ export async function getUserFirstBusiness(userId: string): Promise<{ id: string
 }
 
 /**
- * Get ad plan by package code (from frontend)
- * Package codes: 'starter', 'growth', 'professional'
+ * Get active ad for a business
  */
-export async function getAdPlanByPackageId(packageCode: string): Promise<AdPlan | null> {
-  const { data, error } = await supabase
-    .from('ad_plans')
-    .select('*')
-    .eq('code', packageCode)
-    .eq('is_active', true)
-    .single();
-
-  if (error) {
-    console.error('Error fetching ad plan:', error);
-    return null;
-  }
-
-  return data;
-}
-
-/**
- * Get ad plan by ID
- */
-export async function getAdPlan(adPlanId: string): Promise<AdPlan | null> {
-  const { data, error } = await supabase
-    .from('ad_plans')
-    .select('*')
-    .eq('id', adPlanId)
-    .single();
-
-  if (error) {
-    console.error('Error fetching ad plan:', error);
-    return null;
-  }
-
-  return data;
-}
-
-/**
- * Get existing ad for business and specific plan
- */
-export async function getExistingAdForPlan(
-  businessId: string,
-  adPlanId: string
-): Promise<Ad | null> {
+export async function getActiveAd(businessId: string): Promise<Ad | null> {
   const { data, error } = await supabase
     .from('ads')
     .select('*')
     .eq('business_id', businessId)
-    .eq('ad_plan_id', adPlanId)
+    .in('status', ['active', 'pending_payment'])
     .order('created_at', { ascending: false })
-    .limit(1);
+    .limit(1)
+    .maybeSingle();
 
   if (error) {
-    console.error('Error fetching existing ad:', error);
+    console.error('Error fetching active ad:', error);
     return null;
   }
 
-  return data && data.length > 0 ? data[0] : null;
+  return data;
 }
 
 /**
- * Get latest ad for business (any plan, for getting last end_at)
+ * Get latest ad for a business (including expired)
  */
-export async function getLatestAdForBusiness(businessId: string): Promise<Ad | null> {
+export async function getLatestAd(businessId: string): Promise<Ad | null> {
   const { data, error } = await supabase
     .from('ads')
     .select('*')
     .eq('business_id', businessId)
-    .order('end_at', { ascending: false })
-    .limit(1);
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
 
   if (error) {
     console.error('Error fetching latest ad:', error);
     return null;
   }
 
-  return data && data.length > 0 ? data[0] : null;
+  return data;
 }
 
 /**
- * Calculate new ad dates based on plan
- * - Same plan: extend end_at from current end_at
- * - Different plan: start_at = previous end_at (if exists)
- */
-export function calculateAdDates(
-  adPlan: AdPlan,
-  existingAd: Ad | null,
-  latestAd: Ad | null
-): { startAt: Date; endAt: Date } {
-  const now = new Date();
-  let startAt: Date;
-  let endAt: Date;
-
-  // Determine start date
-  if (existingAd) {
-    // Same plan: start from current end_at if not expired, else now
-    const currentEndAt = new Date(existingAd.end_at!);
-    startAt = currentEndAt > now ? currentEndAt : now;
-  } else if (latestAd && latestAd.end_at) {
-    // Different plan: start from previous ad's end_at
-    startAt = new Date(latestAd.end_at);
-  } else {
-    // First ad ever
-    startAt = now;
-  }
-
-  // Calculate end date
-  endAt = new Date(startAt);
-  const intervalCount = adPlan.billing_interval_count || 1;
-  
-  switch (adPlan.billing_interval) {
-    case 'day':
-      endAt.setDate(endAt.getDate() + intervalCount);
-      break;
-    case 'week':
-      endAt.setDate(endAt.getDate() + (intervalCount * 7));
-      break;
-    case 'month':
-      endAt.setMonth(endAt.getMonth() + intervalCount);
-      break;
-    case 'year':
-      endAt.setFullYear(endAt.getFullYear() + intervalCount);
-      break;
-    default:
-      endAt.setMonth(endAt.getMonth() + 1);
-  }
-
-  return { startAt, endAt };
-}
-
-/**
- * Create new ad
+ * Create new ad campaign
  */
 export async function createAd(
   businessId: string,
-  adPlanId: string,
+  days: number,
+  dailyRateCents: number,
+  totalAmountCents: number,
+  discountPercent: number,
+  hadMembership: boolean,
   startAt: Date,
   endAt: Date,
-  stripeSessionId: string,
-  paymentIntentId: string
+  sessionId: string,
+  paymentIntentId: string | null
 ): Promise<Ad | null> {
   const { data, error } = await supabase
     .from('ads')
     .insert({
       business_id: businessId,
-      ad_plan_id: adPlanId,
       status: 'active',
+      days_purchased: days,
+      daily_rate_cents: dailyRateCents,
+      total_amount_cents: totalAmountCents,
+      discount_percent: discountPercent,
+      had_membership: hadMembership,
       start_at: startAt.toISOString(),
       end_at: endAt.toISOString(),
-      stripe_session_id: stripeSessionId,
+      stripe_session_id: sessionId,
       stripe_payment_intent_id: paymentIntentId,
     })
     .select()
@@ -232,26 +119,49 @@ export async function createAd(
 }
 
 /**
- * Update existing ad's end_at (for same plan renewal)
+ * Extend existing ad campaign
  */
-export async function updateAdEndAt(
+export async function extendAd(
   adId: string,
+  additionalDays: number,
+  dailyRateCents: number,
+  additionalAmount: number,
+  discountPercent: number,
+  hadMembership: boolean,
   newEndAt: Date,
-  stripeSessionId: string,
-  paymentIntentId: string
+  sessionId: string,
+  paymentIntentId: string | null
 ): Promise<boolean> {
+  // Get current ad to calculate new totals
+  const { data: currentAd, error: fetchError } = await supabase
+    .from('ads')
+    .select('days_purchased, total_amount_cents')
+    .eq('id', adId)
+    .single();
+
+  if (fetchError) {
+    console.error('Error fetching current ad:', fetchError);
+    return false;
+  }
+
+  const newTotalDays = (currentAd.days_purchased || 0) + additionalDays;
+  const newTotalAmount = (currentAd.total_amount_cents || 0) + additionalAmount;
+
   const { error } = await supabase
     .from('ads')
     .update({
       end_at: newEndAt.toISOString(),
-      stripe_session_id: stripeSessionId,
+      days_purchased: newTotalDays,
+      total_amount_cents: newTotalAmount,
+      // Keep the original discount/membership info, or update if needed
+      stripe_session_id: sessionId,
       stripe_payment_intent_id: paymentIntentId,
-      status: 'active',
+      updated_at: new Date().toISOString(),
     })
     .eq('id', adId);
 
   if (error) {
-    console.error('Error updating ad end_at:', error);
+    console.error('Error extending ad:', error);
     return false;
   }
 
@@ -259,38 +169,57 @@ export async function updateAdEndAt(
 }
 
 /**
- * Get business ads for display
+ * Calculate dates for ad campaign
+ * If user has active ad, extend from end_at
+ * Otherwise, start from now
  */
-export async function getBusinessAds(businessId: string): Promise<Ad[]> {
-  const { data, error } = await supabase
-    .from('ads')
-    .select('*')
-    .eq('business_id', businessId)
-    .order('created_at', { ascending: false });
+export function calculateAdDates(
+  days: number,
+  existingAd: Ad | null
+): { startAt: Date; endAt: Date } {
+  const now = new Date();
+  let startAt: Date;
 
-  if (error) {
-    console.error('Error fetching business ads:', error);
-    return [];
+  if (existingAd && existingAd.end_at) {
+    const existingEndAt = new Date(existingAd.end_at);
+    // If ad hasn't expired yet, extend from end_at
+    if (existingEndAt > now) {
+      startAt = existingEndAt;
+    } else {
+      startAt = now;
+    }
+  } else {
+    startAt = now;
   }
 
-  return data || [];
+  const endAt = new Date(startAt);
+  endAt.setDate(endAt.getDate() + days);
+
+  return { startAt, endAt };
 }
 
 /**
- * Get business by owner ID
+ * Calculate price with membership discount
  */
-export async function getBusinessByOwnerId(ownerId: string): Promise<{ id: string; name: string } | null> {
-  const { data, error } = await supabase
-    .from('businesses')
-    .select('id, name')
-    .eq('owner_id', ownerId)
-    .limit(1)
-    .single();
+export function calculateAdPrice(
+  days: number,
+  dailyRateCents: number,
+  hasMembership: boolean
+): {
+  subtotal: number;
+  discountPercent: number;
+  discountAmount: number;
+  total: number;
+} {
+  const subtotal = days * dailyRateCents;
+  const discountPercent = hasMembership ? 5.0 : 0;
+  const discountAmount = Math.round(subtotal * (discountPercent / 100));
+  const total = subtotal - discountAmount;
 
-  if (error) {
-    console.error('Error fetching business:', error);
-    return null;
-  }
-
-  return data;
+  return {
+    subtotal,
+    discountPercent,
+    discountAmount,
+    total,
+  };
 }

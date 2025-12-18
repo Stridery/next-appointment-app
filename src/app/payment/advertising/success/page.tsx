@@ -107,13 +107,8 @@ export default function AdvertisingSuccessPage() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-50 to-indigo-100 flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-2xl w-full">
-        {/* Success Icon */}
+        {/* Success Header */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-20 h-20 bg-gradient-to-br from-green-400 to-green-600 rounded-full mb-6 animate-bounce">
-            <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-            </svg>
-          </div>
           <h1 className="text-4xl font-bold text-gray-900 mb-4">
             Payment Successful! 🎉
           </h1>
@@ -165,9 +160,6 @@ export default function AdvertisingSuccessPage() {
         ) : (
           <div className="bg-white rounded-xl shadow-lg p-8 mb-6">
             <div className="text-center">
-              <svg className="w-16 h-16 text-purple-600 mx-auto mb-4" fill="currentColor" viewBox="0 0 20 20">
-                <path d="M2 6a2 2 0 012-2h6a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zM14.553 7.106A1 1 0 0014 8v4a1 1 0 00.553.894l2 1A1 1 0 0018 13V7a1 1 0 00-1.447-.894l-2 1z" />
-              </svg>
               <p className="text-gray-600">
                 Your campaign is being processed. It will appear shortly.
               </p>
