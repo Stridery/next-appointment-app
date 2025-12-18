@@ -31,7 +31,7 @@ export async function GET() {
     // Format plans for frontend
     const formattedPlans = plans.map((plan) => {
       // Format billing period
-      let billingPeriod = plan.billing_interval;
+      let billingPeriod: string = plan.billing_interval;
       if (plan.billing_interval_count > 1) {
         billingPeriod = `${plan.billing_interval_count} ${plan.billing_interval}s`;
       }
